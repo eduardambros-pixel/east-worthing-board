@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>East Worthing Departures</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Doto:wght@600;700;800;900&display=swap');
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;background:#030303;color:#ffb000;overflow:hidden}
+body{font-family:"Doto","Courier New",monospace;display:flex;flex-direction:column;text-shadow:0 0 4px rgba(255,176,0,.55)}
+#head{height:14%;display:flex;align-items:center;justify-content:space-between;padding:0 3vw;border-bottom:2px solid #6b4900}
+#station{font-size:clamp(28px,5vw,50px);font-weight:900;letter-spacing:.12em;white-space:nowrap}
+#clock{font-size:clamp(23px,4vw,40px);font-weight:900;letter-spacing:.06em;white-space:nowrap}
+#board{height:86%;display:flex;flex-direction:column}
+.row{height:16.6667%;padding:0 2.2vw;border-bottom:1px solid #443000;display:flex;align-items:center;overflow:hidden}
+.top{width:100%;display:grid;grid-template-columns:12% 29% 1fr auto auto;column-gap:1.5vw;align-items:center;font-size:clamp(20px,3.38vw,36px);font-weight:900;line-height:1}
+.time,.dest,.where,.coaches,.status{white-space:nowrap}
+.dest,.where{overflow:hidden;text-overflow:clip}
+.where{font-size:.65em}
+.coaches{font-size:.58em}
+.status{font-size:.62em;text-align:right}
+.err{padding:3vw;font-size:24px}
+</style>
+</head>
+<body>
+<header id="head"><div id="station"><span id="stationName"></span></div><div id="clock">--:--:--</div></header>
+<main id="board"></main>
+<script>
+const BASE="https://api.traini.ac/api";
+const STATION="EWR";
+const STATION_NAME="EAST WORTHING";
+const board=document.getElementById("board"),clock=document.getElementById("clock");
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function hhmm(v){
+  if(!v)return"--:--";
+  const d=new Date(v);
+  if(!isNaN(d))return d.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",hour12:false});
+  const m=String(v).match(/(\d{1,2}):(\d{2})/);
+  return m?m[1].padStart(2,"0")+":"+m[2]:"--:--";
+}
+function calls(x){
+  return (x.calling_points||[]).map(p=>p?.station?.name).filter(Boolean).join("  •  ");
+}
+function statusText(x,pos){
+  const raw=String(x.status_text||pos?.variation_status||"").trim();
+  if(/cancel/i.test(raw))return"CANCELLED";
+  const mins=raw.match(/(\d+)\s*(?:min|minute)/i);
+  if(mins && !/on time/i.test(raw))return `${mins[1]} min late`;
+  if(/late|delay/i.test(raw) && pos?.variation!=null){
+    const n=Math.round(Number(pos.variation)/60);
+    if(n>0)return `${n} min late`;
+  }
+  if(/on time/i.test(raw))return"On time";
+  return raw.replaceAll("_"," ")||"";
+}
+
+const announced=new Set();
+
+function announceAtPlatform(x,pos){
+  if(!("speechSynthesis" in window) || !pos) return;
+  const loc=String(pos.last_location||"");
+  if(!/EAST WORTHING/i.test(loc)) return;
+
+  const id=String(x.train_id||`${x.departs}-${x.destination?.name||""}`);
+  if(announced.has(id)) return;
+
+  const platform=String(x.platform||"").trim();
+  const destination=String(x.destination?.name||"").trim();
+  const time=hhmm(x.departs).replace(":"," ");
+  if(!destination || time==="-- --") return;
+
+  announced.add(id);
+  const words = platform
+    ? `The train at platform ${platform} is the ${time} service to ${destination}.`
+    : `The train at the platform is the ${time} service to ${destination}.`;
+
+  const u=new SpeechSynthesisUtterance(words);
+  u.lang="en-GB";
+  u.rate=0.92;
+  u.pitch=1.0;
+  speechSynthesis.speak(u);
+}
+
+function render(rows,positions={}){
+  board.innerHTML=rows.slice(0,6).map(x=>{
+    const pos=positions[x.train_id];
+    const state=platformState.get(String(x.train_id||""));
+    const loc=String(pos?.last_location||"");
+    const where=state?.atPlatform ? "AT PLATFORM" : (loc ? `At ${loc}` : "");
+    const coach=x.coaches ? `${x.coaches} cs` : "";
+    const st=statusText(x,pos);
+    return `<section class="row">
+      <div class="top">
+        <div class="time">${esc(hhmm(x.departs))}</div>
+        <div class="dest">${esc(x.destination?.name||"")}</div>
+        <div class="where">${esc(where)}</div>
+        <div class="coaches">${esc(coach)}</div>
+        <div class="status">${esc(st)}</div>
+      </div>
+    </section>`;
+  }).join("");
+}
+
+const knownRows=new Map();
+const platformState=new Map(); // train_id -> {atPlatform, platform, actual}
+let activityInitialised=false;
+
+async function getActivity(){
+  try{
+    const r=await fetch(`${BASE}/stations/${STATION}/activity?limit=30`,{cache:"no-store"});
+    if(!r.ok)return;
+    const j=await r.json();
+    const events=(j.results||[]).slice().reverse(); // oldest -> newest
+
+    for(const e of events){
+      const id=String(e.train_id||"");
+      if(!id)continue;
+
+      if(e.event_type==="ARRIVAL"){
+        const wasAt=platformState.get(id)?.atPlatform===true;
+        platformState.set(id,{atPlatform:true,platform:e.platform||"",actual:e.actual||null});
+
+        // Only announce genuinely new arrivals after the first activity snapshot.
+        if(activityInitialised && !wasAt){
+          const row=knownRows.get(id);
+          if(row) announcePlatformArrival(row,e.platform||row.platform||"");
+        }
+      } else if(e.event_type==="DEPARTURE"){
+        const old=platformState.get(id)||{};
+        if(old.atPlatform){
+          platformState.set(id,{
+            atPlatform:false,
+            platform:e.platform||old.platform||"",
+            actual:e.actual||null,
+            departedUntil:Date.now()+60000
+          });
+        }
+      }
+    }
+    activityInitialised=true;
+    await refreshDisplay();
+  }catch{}
+}
+
+function announcePlatformArrival(x,platform){
+  if(!("speechSynthesis" in window))return;
+  const id=String(x.train_id||`${x.departs}-${x.destination?.name||""}`);
+  if(announced.has(id))return;
+
+  const destination=String(x.destination?.name||"").trim();
+  const time=hhmm(x.departs).replace(":"," ");
+  if(!destination || time==="-- --")return;
+
+  announced.add(id);
+  const words=platform
+    ? `The train at platform ${platform} is the ${time} service to ${destination}.`
+    : `The train at the platform is the ${time} service to ${destination}.`;
+
+  const u=new SpeechSynthesisUtterance(words);
+  u.lang="en-GB";
+  u.rate=0.92;
+  speechSynthesis.speak(u);
+}
+
+let latestRows=[];
+let latestPositions={};
+
+async function refreshDisplay(){
+  // Retain an arrived train even if /departures has just stopped listing it.
+  const retained=[];
+  for(const [id,state] of platformState){
+    const hold=state.atPlatform || (state.departedUntil && Date.now()<state.departedUntil);
+    if(hold && knownRows.has(id) && !latestRows.some(r=>String(r.train_id)===id)){
+      retained.push(knownRows.get(id));
+    }
+  }
+  const rows=[...retained,...latestRows]
+    .filter((r,i,a)=>a.findIndex(q=>String(q.train_id)===String(r.train_id))===i)
+    .slice(0,6);
+  render(rows,latestPositions);
+}
+
+async function getPosition(id){
+  if(!id)return null;
+  try{
+    const r=await fetch(`${BASE}/train?train_id=${encodeURIComponent(id)}`,{cache:"no-store"});
+    if(!r.ok)return null;
+    const j=await r.json();
+    return (j.results||[]).find(v=>v.last_location) || (j.results||[])[0] || null;
+  }catch{return null}
+}
+async function load(){
+  try{
+    const r=await fetch(`${BASE}/departures/${STATION}?limit=6`,{cache:"no-store"});
+    if(!r.ok)throw new Error();
+    const j=await r.json();
+    latestRows=(j.results||[]).slice(0,6);
+    latestRows.forEach(x=>{
+      if(x.train_id)knownRows.set(String(x.train_id),x);
+    });
+
+    latestPositions={};
+    await Promise.all(latestRows.map(async x=>{
+      const p=await getPosition(x.train_id);
+      if(p)latestPositions[x.train_id]=p;
+    }));
+    await refreshDisplay();
+  }catch{
+    if(!board.children.length)board.innerHTML='<div class="err">LIVE DATA UNAVAILABLE</div>';
+  }
+}
+function tick(){clock.textContent=new Date().toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})}
+tick();setInterval(tick,1000);
+load();setInterval(load,60000);getActivity();setInterval(getActivity,10000);
+</script>
+</body>
+</html>
