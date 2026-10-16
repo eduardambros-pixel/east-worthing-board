@@ -1,0 +1,33 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lluc · Live train tracker</title><style>@import url('https://fonts.googleapis.com/css2?family=Doto:wght@700;900&display=swap');*{box-sizing:border-box}html,body{margin:0;height:100%;background:#050505;color:#ffb000;font:900 clamp(17px,2.8vw,29px) Doto,monospace}body{display:flex;flex-direction:column}header{height:18%;border-bottom:2px solid #684800;display:flex;align-items:center;justify-content:space-between;padding:0 3vw}h1{font-size:clamp(21px,4.1vw,43px);margin:0}#clock{font-size:clamp(19px,3.6vw,38px)}main{flex:1;display:flex;flex-direction:column;min-height:0}.leg{flex:1;min-height:0;padding:1.2vh 3vw;border-bottom:1px solid #684800;display:flex;flex-direction:column;justify-content:space-evenly}.route{display:flex;justify-content:space-between;gap:2vw;font-size:clamp(18px,3.2vw,33px)}.detail{color:#ffd47b;font-size:clamp(17px,3vw,31px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.status{font-size:clamp(15px,2.5vw,26px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}footer{min-height:17%;padding:1vh 3vw;display:flex;flex-direction:column;justify-content:space-around;font-size:clamp(13px,2.15vw,23px)}.warn{color:#ff776d}.dim{color:#ae8a50}</style></head><body><header><h1>LLUC · BRI → WRH</h1><div id="clock">--:--:--</div></header><main><section class="leg"><div class="route"><span>18:22 BRISTOL</span><span>20:04 SOUTHAMPTON</span></div><div id="where1" class="detail">Locating booked train…</div><div id="status1" class="status dim">Checking live service</div></section><section class="leg"><div class="route"><span>20:50 SOUTHAMPTON</span><span>22:14 EWR / WRH</span></div><div id="where2" class="detail">Locating booked train…</div><div id="status2" class="status dim">Checking live service</div></section><footer><div id="connection">Connection: 46 min scheduled</div><div id="updated" class="dim">Live railway reports · Refresh every 30 seconds</div></footer></main><script>
+const BASE='https://api.traini.ac/api',DAY='2026-10-16';
+const $=id=>document.getElementById(id);
+function clock(){ $('clock').textContent=new Date().toLocaleTimeString('en-GB',{timeZone:'Europe/London',hour12:false});}clock();setInterval(clock,1000);
+function hhmm(v){if(!v)return '';const d=new Date(v);if(!isNaN(d))return d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/London'});return String(v).match(/\b\d\d:\d\d\b/)?.[0]||'';}
+function serviceTime(x){return hhmm(x.departs||x.scheduled_departure||x.scheduled||x.departure_time);}
+function label(x){return String(x?.status_text||'Status not supplied').replaceAll('_',' ');}
+async function get(url){const r=await fetch(url,{cache:'no-store'});if(!r.ok)throw Error('Live feed HTTP '+r.status);return r.json();}
+async function board(crs){const j=await get(`${BASE}/departures/${crs}?limit=100`);return j.results||[];}
+async function location(x){if(!x?.train_id)return '';try{const j=await get(`${BASE}/train?train_id=${encodeURIComponent(x.train_id)}`);const pos=(j.results||[]).find(v=>v.last_location)||(j.results||[])[0];return String(pos?.last_location||'').trim();}catch{return '';}}
+function find(rows,scheduled,matcher){const exact=rows.filter(x=>serviceTime(x)===scheduled);return exact.find(x=>matcher.test(x.destination?.name||''))||exact[0]||null;}
+function show(n,x,loc){$('where'+n).textContent=x?(loc?'LAST REPORTED: '+loc.toUpperCase():'LOCATION NOT YET REPORTED'):'BOOKED TRAIN NOT IN LIVE FEED';$('status'+n).textContent=x?label(x)+(x.platform?' · Platform '+x.platform:''):'Will retry automatically';}
+function minutes(v){if(!v)return null;const d=new Date(v);return Number.isNaN(+d)?null:+d;}
+function arrivalEstimate(x){for(const k of ['expected_arrival','arrives','arrival','arrival_time']){const m=minutes(x?.[k]);if(m!==null)return m;}return null;}
+let busy=false;
+async function refresh(){if(busy)return;busy=true;try{
+const [bri,sou]=await Promise.all([board('BRI'),board('SOU')]);
+const first=find(bri,'18:22',/southampton|portsmouth|brighton/i);
+const second=find(sou,'20:50',/worthing|brighton|littlehampton|hove|chichester|bognor/i);
+const [p1,p2]=await Promise.all([location(first),location(second)]);show(1,first,p1);show(2,second,p2);
+const cancelled=second&&/cancel/i.test(label(second));
+const alternatives=sou.filter(x=>serviceTime(x)>'20:50'&&/worthing|brighton|hove|shoreham|littlehampton|chichester|bognor/i.test(x.destination?.name||'')).sort((a,b)=>serviceTime(a).localeCompare(serviceTime(b)));
+const scheduledArr=Date.parse(DAY+'T20:04:00+01:00'),scheduledDep=Date.parse(DAY+'T20:50:00+01:00');
+const estimated=arrivalEstimate(first);let note='SOUTHAMPTON CONNECTION: 46 MIN SCHEDULED';let danger=false;
+if(cancelled){note='20:50 CANCELLED';danger=true;}
+else if(estimated!==null){const mins=Math.floor((scheduledDep-estimated)/60000);note=mins<0?'20:50 CONNECTION LIKELY MISSED':`CONNECTION: ~${mins} MIN IF ARRIVAL ESTIMATE HOLDS`;danger=mins<10;}
+else if(first&&/cancel/i.test(label(first))){note='FIRST TRAIN CANCELLED · CHECK REBOOKING';danger=true;}
+if(danger&&alternatives.length){const alt=alternatives[0];note+=` · LATER ${serviceTime(alt)} ${String(alt.destination?.name||'').toUpperCase()} (CHECK STOPS)`;}
+$('connection').textContent=note;$('connection').className=danger?'warn':'';
+$('updated').textContent='UPDATED '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'})+' · LAST REPORTED LOCATIONS · 30 SEC REFRESH';
+}catch(e){$('updated').textContent='LIVE DATA ERROR: '+e.message+' · RETRYING';$('updated').className='warn';}finally{busy=false;}}
+refresh();setInterval(refresh,30000);
+</script></body></html>
